@@ -13,6 +13,7 @@ const Segmentation = () => import('@/views/segmentation/index.vue')
 const ReportGen = () => import('@/views/report_gen/index.vue')
 const Forecast = () => import('@/views/forecast/index.vue')
 const DataMart = () => import('@/views/data_mart/index.vue')
+const DataMartStorage = () => import('@/views/data_mart_storage/index.vue')
 const StatModel = () => import('@/views/stat_model/index.vue')
 const DataExtract = () => import('@/views/data_extract/index.vue')
 const QualityMon = () => import('@/views/quality_mon/index.vue')
@@ -36,6 +37,7 @@ const router = createRouter({
     { path: '/report_gen', name: 'report_gen', component: ReportGen },
     { path: '/forecast', name: 'forecast', component: Forecast },
     { path: '/data_mart', name: 'data_mart', component: DataMart },
+    { path: '/data_mart_storage', name: 'data_mart_storage', component: DataMartStorage },
     { path: '/stat_model', name: 'stat_model', component: StatModel },
     { path: '/data_extract', name: 'data_extract', component: DataExtract },
     { path: '/quality_mon', name: 'quality_mon', component: QualityMon },

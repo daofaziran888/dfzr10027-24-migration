@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import math
 import statistics
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from app.fixtures import (
@@ -20,7 +20,14 @@ from app.fixtures import (
     QUALITY_CHECK_SAMPLES,
     TREND_POINTS,
 )
-from app.store import store
+from app.services import mart_storage
+from app.services.experiment_stats import STAT_ROW_TYPE, compute_experiment_stat
+from app import store as store_module
+
+
+def store():
+    """动态获取当前全局 store，保证 reset_store() 后跟随新实例。"""
+    return store_module.store
 
 # ---------------------------------------------------------------------------
 # 内部辅助
@@ -28,7 +35,7 @@ from app.store import store
 
 def _write_result(pipeline_id: str, payload: dict[str, Any]) -> None:
     """把管道产物写入 store._pipeline_results，支持追加与幂等覆盖。"""
-    table = store.rows("_pipeline_results")
+    table = store().rows("_pipeline_results")
     # 若同 pipeline_id 已存在则更新，否则追加
     for row in table:
         if row.get("pipeline_id") == pipeline_id:
@@ -41,7 +48,7 @@ def _write_result(pipeline_id: str, payload: dict[str, Any]) -> None:
 
 
 def _read_result(pipeline_id: str) -> dict[str, Any] | None:
-    for row in store.rows("_pipeline_results"):
+    for row in store().rows("_pipeline_results"):
         if row.get("pipeline_id") == pipeline_id:
             return dict(row)
     return None
@@ -275,7 +282,12 @@ def run_cohort_extract_pipeline(rule: dict[str, Any] | None = None) -> dict[str,
 # ---------------------------------------------------------------------------
 
 def run_experiment_stat_pipeline(experiment_code: str | None = None) -> dict[str, Any]:
-    """读取实验 fixtures，执行双比例 z 检验与效应量计算，产物写入数据集市。"""
+    """读取实验 fixtures，执行双比例 z 检验与效应量计算，产物写入集市存储。
+
+    写入端与集市读取端共用 experiment_stats 计算口径与 mart_storage 行类型来源：
+    - 旧结构读端：统计行（无数字 id、row_type=experiment_stat）幂等写入混合列表；
+    - 新结构读端：统计记录幂等 upsert 进统计记录表，重复回填不会多一份。
+    """
     rows = list(EXPERIMENT_RESULTS)
     if experiment_code is None:
         experiment_code = "EXPE-001"
@@ -289,46 +301,36 @@ def run_experiment_stat_pipeline(experiment_code: str | None = None) -> dict[str
     if control is None or treatment is None:
         return {"error": "缺少对照组或实验组"}
 
-    n_c = _to_int(control.get("样本量"))
-    n_t = _to_int(treatment.get("样本量"))
-    conv_c = _to_int(control.get("转化人数"))
-    conv_t = _to_int(treatment.get("转化人数"))
+    business_date = str(control.get("日期"))
+    stat = compute_experiment_stat(
+        control, treatment,
+        experiment_code=experiment_code,
+        business_date=business_date,
+        sample_date=str(control.get("日期")),
+    )
 
-    p_c = conv_c / n_c if n_c else 0.0
-    p_t = conv_t / n_t if n_t else 0.0
-    p_pool = (conv_c + conv_t) / (n_c + n_t) if (n_c + n_t) else 0.0
-    se = math.sqrt(p_pool * (1 - p_pool) * (1 / n_c + 1 / n_t)) if (n_c + n_t) else 0.0
-    z = (p_t - p_c) / se if se else 0.0
-
-    # Cohen's h 效应量
-    cohen_h = 2 * (math.asin(math.sqrt(p_t)) - math.asin(math.sqrt(p_c))) if (p_t >= 0 and p_c >= 0) else 0.0
+    # 行类型可区分的统一来源：按当前读模式路由，并保证幂等
+    mart_row = dict(stat)
+    mart_row["主题编号"] = f"DATA-STAT-{experiment_code}"  # 旧主题编号，无数字 id
+    written, created = mart_storage.upsert_statistic(mart_row)
 
     result = {
         "experiment_code": experiment_code,
-        "control_rate": round(p_c, 4),
-        "treatment_rate": round(p_t, 4),
-        "absolute_lift": round(p_t - p_c, 4),
-        "relative_lift": round((p_t - p_c) / p_c, 4) if p_c else None,
-        "z_score": round(z, 4),
-        "cohen_h": round(cohen_h, 4),
-        "significant_at_05": abs(z) > 1.96,
-        "sample_size_control": n_c,
-        "sample_size_treatment": n_t,
+        "control_rate": stat["控制组转化率"],
+        "treatment_rate": stat["实验组转化率"],
+        "absolute_lift": stat["绝对提升"],
+        "relative_lift": stat["相对提升"],
+        "z_score": stat["z_score"],
+        "cohen_h": stat["cohen_h"],
+        "significant_at_05": stat["显著性"],
+        "sample_size_control": stat["控制组样本量"],
+        "sample_size_treatment": stat["实验组样本量"],
+        "business_date": stat["业务日期"],
+        "sample_date": stat["样本日期"],
+        "write_mode": mart_storage.get_read_mode(),
+        "created": created,
+        "stat_row_type": STAT_ROW_TYPE,
     }
-
-    # 同时写入 data_mart 可消费的统计摘要行
-    mart_entry = {
-        "主题编号": f"DATA-STAT-{experiment_code}",
-        "region": "all",
-        "channel": "all",
-        "日期": str(date.today()),
-        "实验编号": experiment_code,
-        "控制组转化率": result["control_rate"],
-        "实验组转化率": result["treatment_rate"],
-        "相对提升": result["relative_lift"],
-        "显著性": result["significant_at_05"],
-    }
-    store.rows("data_mart").append(mart_entry)
 
     _write_result("experiment_stat_mart", {
         "source_modules": ["experiment", "stat_model"],
@@ -366,10 +368,10 @@ def run_quality_scan() -> dict[str, Any]:
 
     # 扫描 store 各模块的 abnormal 标记
     module_issues: list[dict] = []
-    for mod in store.module_names():
+    for mod in store().module_names():
         if mod.startswith("_"):
             continue
-        rows = store.rows(mod)
+        rows = store().rows(mod)
         abnormal_count = sum(1 for r in rows if r.get("abnormal"))
         if abnormal_count:
             module_issues.append({"module": mod, "abnormal_count": abnormal_count})
@@ -498,4 +500,4 @@ def run_all_pipelines() -> dict[str, Any]:
 
 
 def list_pipeline_results() -> list[dict[str, Any]]:
-    return [dict(r) for r in store.rows("_pipeline_results")]
+    return [dict(r) for r in store().rows("_pipeline_results")]

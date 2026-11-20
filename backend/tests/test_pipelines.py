@@ -14,8 +14,12 @@ from app.services.pipeline_orchestrator import (
     run_metric_agg_pipeline,
     run_quality_scan,
 )
-from app.store import store
+from app import store as store_module
 
+
+def store():
+    """动态获取当前全局 store，配合 conftest 的 reset_store 隔离。"""
+    return store_module.store
 
 class TestMetricAggPipeline:
     """Pipeline 1: metric_def -> agg_task -> api_service"""
@@ -140,12 +144,36 @@ class TestExperimentStatPipeline:
         assert result["sample_size_treatment"] == 8000
 
     def test_mart_entry_written(self):
-        before = len(store.rows("data_mart"))
+        # 集市存储上线后，统计行以 row_type=experiment_stat 幂等写入，
+        # 且不会与带数字 id 的主题配置行混在一起
         run_experiment_stat_pipeline("EXPE-001")
-        after = len(store.rows("data_mart"))
-        assert after == before + 1
-        last = store.rows("data_mart")[-1]
-        assert last.get("实验编号") == "EXPE-001"
+        mart_rows = store().rows("data_mart")
+        stat_rows = [row for row in mart_rows
+                     if row.get("row_type") == "experiment_stat"
+                     and row.get("实验编号") == "EXPE-001"
+                     and row.get("业务日期") == "2026-08-15"]
+        assert len(stat_rows) == 1
+        last = stat_rows[-1]
+        assert last.get("id") is None  # 统计行没有数字主题编号
+        # 主题配置行仍是原来的 3 条，数字 id 与元数据未受影响
+        topic_rows = [row for row in mart_rows if row.get("id") is not None]
+        assert len(topic_rows) == 3
+
+    def test_mart_entry_idempotent(self):
+        # 重复回填同一实验同一业务日时数据不能多一份
+        run_experiment_stat_pipeline("EXPE-001")
+        matching = [row for row in store().rows("data_mart")
+                    if row.get("row_type") == "experiment_stat"
+                    and row.get("实验编号") == "EXPE-001"
+                    and row.get("业务日期") == "2026-08-15"]
+        assert len(matching) == 1
+        run_experiment_stat_pipeline("EXPE-001")
+        run_experiment_stat_pipeline("EXPE-001")
+        matching = [row for row in store().rows("data_mart")
+                    if row.get("row_type") == "experiment_stat"
+                    and row.get("实验编号") == "EXPE-001"
+                    and row.get("业务日期") == "2026-08-15"]
+        assert len(matching) == 1
 
     def test_pipeline_result_written(self):
         run_experiment_stat_pipeline("EXPE-001")

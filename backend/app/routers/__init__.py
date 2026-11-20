@@ -18,6 +18,7 @@ from app.routers import segmentation as router_segmentation
 from app.routers import report_gen as router_report_gen
 from app.routers import forecast as router_forecast
 from app.routers import data_mart as router_data_mart
+from app.routers import data_mart_storage as router_data_mart_storage
 from app.routers import stat_model as router_stat_model
 from app.routers import data_extract as router_data_extract
 from app.routers import quality_mon as router_quality_mon
@@ -26,4 +27,6 @@ from app.routers import api_service as router_api_service
 from app.routers import schedule_plan as router_schedule_plan
 from app.routers import pipeline as router_pipeline
 
-ROUTERS = [router_metric_def, router_dim_registry, router_agg_task, router_cube_builder, router_cohort_rule, router_experiment, router_trend_series, router_attribution, router_segmentation, router_report_gen, router_forecast, router_data_mart, router_stat_model, router_data_extract, router_quality_mon, router_compare_job, router_api_service, router_schedule_plan, router_pipeline]
+# 注意：data_mart_storage 必须在 data_mart 之前注册——后者含 /{entry_id}
+# 数字路径参数，后注册会抢先匹配 /topics、/statistics 等静态多级路径。
+ROUTERS = [router_metric_def, router_dim_registry, router_agg_task, router_cube_builder, router_cohort_rule, router_experiment, router_trend_series, router_attribution, router_segmentation, router_report_gen, router_forecast, router_data_mart_storage, router_data_mart, router_stat_model, router_data_extract, router_quality_mon, router_compare_job, router_api_service, router_schedule_plan, router_pipeline]
